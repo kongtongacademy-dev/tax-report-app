@@ -1,0 +1,121 @@
+import streamlit as st
+import pandas as pd
+import io
+import re
+
+# ฟังก์ชันช่วยรันเลข Invoice
+def generate_invoice_map(df, start_inv, order_col="Order ID", date_col="Created Time"):
+    # เรียงข้อมูลตามวันที่
+    df_sorted = df.sort_values(by=date_col, ascending=True)
+    # หา Order ID ที่ไม่ซ้ำกัน
+    unique_orders = df_sorted[order_col].unique()
+    
+    # แยก Prefix (ตัวอักษร) และ Number (ตัวเลข)
+    match = re.match(r"^(.*?)(\d+)$", start_inv)
+    if not match:
+        return None, "รูปแบบเลข Invoice ไม่ถูกต้อง (ต้องลงท้ายด้วยตัวเลข)"
+    
+    prefix = match.group(1)
+    start_num_str = match.group(2)
+    num_length = len(start_num_str)
+    current_num = int(start_num_str)
+    
+    # สร้างการจับคู่ Order ID -> Invoice No
+    inv_map = {}
+    for order_id in unique_orders:
+        new_inv = f"{prefix}{str(current_num).zfill(num_length)}"
+        inv_map[order_id] = new_inv
+        current_num += 1
+        
+    return inv_map, None
+
+st.set_page_config(page_title="Excel Tax Report Generator", layout="wide")
+st.title("📊 ระบบจัดการไฟล์ Excel & รายงานภาษีขาย")
+
+# เมนูด้านซ้าย
+with st.sidebar:
+    st.header("1. อัปโหลดไฟล์")
+    uploaded_file = st.file_uploader("เลือกไฟล์ Excel/CSV ที่นี่", type=['xlsx', 'csv'])
+    st.markdown("---")
+    st.header("2. ตั้งค่า")
+    header_row = st.number_input("หัวข้อตารางอยู่บรรทัดที่เท่าไหร่? (เริ่มนับที่ 0)", min_value=0, value=1, step=1)
+
+# การทำงานหลัก
+if uploaded_file is not None:
+    try:
+        # อ่านไฟล์
+        if uploaded_file.name.endswith('.csv'):
+            df = pd.read_csv(uploaded_file, header=header_row)
+        else:
+            df = pd.read_excel(uploaded_file, header=header_row)
+
+        # แปลงวันที่
+        if "Created Time" in df.columns:
+            df["Created Time"] = pd.to_datetime(df["Created Time"], dayfirst=True, errors='coerce')
+
+        tab1, tab2 = st.tabs(["📑 รายงานภาษีขาย", "🔍 เรียงข้อมูลทั่วไป"])
+
+        # --- TAB 1: รายงานภาษีขาย ---
+        with tab1:
+            st.subheader("สร้างรายงานภาษีขาย (รันเลข Invoice + แก้ค่าส่งซ้ำ)")
+            start_invoice = st.text_input("ระบุเลข Invoice ใบแรก (เช่น TINV251100001)", value="TINV251100001")
+            
+            if st.button("🚀 สร้างรายงานภาษีขาย", type="primary"):
+                # รายชื่อคอลัมน์ที่ต้องใช้
+                required_cols = ["Order ID", "Created Time", "SKU ID", "Product Name", "Variation", 
+                                 "SKU Unit Original Price", "Quantity", "SKU Seller Discount", 
+                                 "Shipping Fee After Discount", "Order Status"]
+                
+                missing = [c for c in required_cols if c not in df.columns]
+                if missing:
+                    st.error(f"❌ ขาดคอลัมน์: {missing} กรุณาตรวจสอบไฟล์ต้นฉบับ")
+                else:
+                    inv_map, error = generate_invoice_map(df, start_invoice)
+                    if error:
+                        st.error(error)
+                    else:
+                        df_tax = df.copy()
+                        df_tax = df_tax.sort_values(by="Created Time", ascending=True)
+                        df_tax['Invoice No'] = df_tax['Order ID'].map(inv_map)
+                        
+                        # คำนวณยอดเงิน
+                        df_tax['SKU Unit Original Price'] = pd.to_numeric(df_tax['SKU Unit Original Price'], errors='coerce').fillna(0)
+                        df_tax['Quantity'] = pd.to_numeric(df_tax['Quantity'], errors='coerce').fillna(0)
+                        df_tax['จำนวนเงิน'] = df_tax['SKU Unit Original Price'] * df_tax['Quantity']
+                        
+                        # **แก้ค่าขนส่งซ้ำ**
+                        df_tax['Shipping Fee After Discount'] = pd.to_numeric(df_tax['Shipping Fee After Discount'], errors='coerce').fillna(0)
+                        is_duplicate_order = df_tax.duplicated(subset=['Order ID'], keep='first')
+                        df_tax.loc[is_duplicate_order, 'Shipping Fee After Discount'] = 0
+                        
+                        # เลือกและเปลี่ยนชื่อคอลัมน์
+                        cols_mapping = {
+                            'Invoice No': 'Invoice No', 'Order ID': 'Order ID', 'Created Time': 'Created Time',
+                            'SKU ID': 'SKU ID', 'Product Name': 'Product Name', 'Variation': 'Variation',
+                            'SKU Unit Original Price': 'SKU Unit Original Price', 'Quantity': 'Quantity',
+                            'จำนวนเงิน': 'จำนวนเงิน', 'SKU Seller Discount': 'ส่วนลด',
+                            'Shipping Fee After Discount': 'ค่าขนส่ง', 'Order Status': 'Order Status'
+                        }
+                        final_cols = list(cols_mapping.keys())
+                        df_final = df_tax[final_cols].rename(columns=cols_mapping)
+                        
+                        st.success("✅ สร้างรายงานสำเร็จ (ค่าขนส่งซ้ำเป็น 0 แล้ว)")
+                        st.dataframe(df_final.head(10))
+                        
+                        # ดาวน์โหลด
+                        buffer = io.BytesIO()
+                        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                            df_final.to_excel(writer, index=False)
+                        st.download_button("⬇️ ดาวน์โหลดรายงาน (.xlsx)", buffer.getvalue(), f"Tax_Report_{start_invoice}.xlsx")
+
+        # --- TAB 2: โหมดเดิม ---
+        with tab2:
+            st.write("โหมดเรียงข้อมูลปกติ (Oldest -> Newest)")
+            if st.button("เรียงข้อมูล"):
+                target_cols = ["Order ID", "Order Status", "SKU ID", "Product Name", "Variation", "Quantity", "Created Time"]
+                avail_cols = [c for c in target_cols if c in df.columns]
+                df_filt = df[avail_cols].sort_values(by="Created Time", ascending=True)
+                st.dataframe(df_filt.head())
+
+    except Exception as e:
+        st.error(f"เกิดข้อผิดพลาด: {e}")
