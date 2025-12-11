@@ -3,7 +3,9 @@ import pandas as pd
 import io
 import re
 
+# ---------------------------------------------------------
 # ฟังก์ชันช่วยรันเลข Invoice
+# ---------------------------------------------------------
 def generate_invoice_map(df, start_inv, order_col="Order ID", date_col="Created Time"):
     # เรียงข้อมูลตามวันที่
     df_sorted = df.sort_values(by=date_col, ascending=True)
@@ -29,18 +31,31 @@ def generate_invoice_map(df, start_inv, order_col="Order ID", date_col="Created 
         
     return inv_map, None
 
+# ---------------------------------------------------------
+# ตั้งค่าหน้าเว็บ
+# ---------------------------------------------------------
 st.set_page_config(page_title="Excel Tax Report Generator", layout="wide")
 st.title("📊 ระบบจัดการไฟล์ Excel & รายงานภาษีขาย")
 
-# เมนูด้านซ้าย
+# ---------------------------------------------------------
+# Sidebar
+# ---------------------------------------------------------
 with st.sidebar:
     st.header("1. อัปโหลดไฟล์")
     uploaded_file = st.file_uploader("เลือกไฟล์ Excel/CSV ที่นี่", type=['xlsx', 'csv'])
+    
     st.markdown("---")
-    st.header("2. ตั้งค่า")
-    header_row = st.number_input("หัวข้อตารางอยู่บรรทัดที่เท่าไหร่? (เริ่มนับที่ 0)", min_value=0, value=1, step=1)
+    st.header("2. ตั้งค่าการอ่านไฟล์")
+    # ไฟล์ CSV ส่วนใหญ่มักจะมีหัวข้ออยู่บรรทัดแรก (0) แต่ถ้ามาจาก Shopee บางทีเป็น 1
+    header_row = st.number_input(
+        "หัวข้อตารางอยู่บรรทัดที่เท่าไหร่? (ปกติใช้เลข 0 หรือ 1)", 
+        min_value=0, value=0, step=1,
+        help="ลองเปลี่ยนเลขนี้ถ้าโหลดแล้วไม่เจอชื่อคอลัมน์"
+    )
 
-# การทำงานหลัก
+# ---------------------------------------------------------
+# Main Logic
+# ---------------------------------------------------------
 if uploaded_file is not None:
     try:
         # อ่านไฟล์
@@ -49,73 +64,112 @@ if uploaded_file is not None:
         else:
             df = pd.read_excel(uploaded_file, header=header_row)
 
-        # แปลงวันที่
+        # [สำคัญ] ลบช่องว่างหัวท้ายชื่อคอลัมน์ (แก้ปัญหาชื่อ ' Order ID ' มีวรรค)
+        df.columns = df.columns.str.strip()
+
+        # แปลงวันที่ (รองรับทั้งแบบไทยและสากล)
         if "Created Time" in df.columns:
             df["Created Time"] = pd.to_datetime(df["Created Time"], dayfirst=True, errors='coerce')
 
-        tab1, tab2 = st.tabs(["📑 รายงานภาษีขาย", "🔍 เรียงข้อมูลทั่วไป"])
+        # สร้าง Tabs
+        tab1, tab2 = st.tabs(["📑 รายงานภาษีขาย (Tax Report)", "🔍 เช็คข้อมูลต้นฉบับ"])
 
-        # --- TAB 1: รายงานภาษีขาย ---
+        # =========================================================
+        # TAB 1: สร้างรายงานภาษีขาย
+        # =========================================================
         with tab1:
-            st.subheader("สร้างรายงานภาษีขาย (รันเลข Invoice + แก้ค่าส่งซ้ำ)")
-            start_invoice = st.text_input("ระบุเลข Invoice ใบแรก (เช่น TINV251100001)", value="TINV251100001")
+            st.subheader("สร้างรายงานภาษีขาย (Invoice Running + Fix Shipping Fee)")
+            
+            col_input, col_btn = st.columns([2, 1])
+            with col_input:
+                start_invoice = st.text_input("ระบุเลข Invoice ใบแรก", value="TINV251100001")
             
             if st.button("🚀 สร้างรายงานภาษีขาย", type="primary"):
-                # รายชื่อคอลัมน์ที่ต้องใช้
-                required_cols = ["Order ID", "Created Time", "SKU ID", "Product Name", "Variation", 
-                                 "SKU Unit Original Price", "Quantity", "SKU Seller Discount", 
-                                 "Shipping Fee After Discount", "Order Status"]
+                # คอลัมน์ที่จำเป็น (Mapping ชื่อตามไฟล์ CSV ของคุณ)
+                required_cols = [
+                    "Order ID", "Created Time", "SKU ID", "Product Name", "Variation", 
+                    "SKU Unit Original Price", "Quantity", "SKU Seller Discount", 
+                    "Shipping Fee After Discount", "Order Status"
+                ]
                 
+                # เช็คว่าคอลัมน์ไหนหายไปบ้าง
                 missing = [c for c in required_cols if c not in df.columns]
+                
                 if missing:
-                    st.error(f"❌ ขาดคอลัมน์: {missing} กรุณาตรวจสอบไฟล์ต้นฉบับ")
+                    st.error(f"❌ ไม่พบคอลัมน์: {missing}")
+                    st.warning("คำแนะนำ: ลองเปลี่ยนตัวเลข 'บรรทัดหัวข้อ' ด้านซ้าย (ลองเปลี่ยนเป็น 0 หรือ 1)")
+                    st.write("คอลัมน์ที่เจอในไฟล์ตอนนี้:", df.columns.tolist())
                 else:
+                    # 1. สร้าง Invoice Map
                     inv_map, error = generate_invoice_map(df, start_invoice)
+                    
                     if error:
                         st.error(error)
                     else:
                         df_tax = df.copy()
+                        
+                        # 2. เรียงวันที่ (เก่า -> ใหม่)
                         df_tax = df_tax.sort_values(by="Created Time", ascending=True)
+                        
+                        # 3. ใส่เลข Invoice
                         df_tax['Invoice No'] = df_tax['Order ID'].map(inv_map)
                         
-                        # คำนวณยอดเงิน
-                        df_tax['SKU Unit Original Price'] = pd.to_numeric(df_tax['SKU Unit Original Price'], errors='coerce').fillna(0)
-                        df_tax['Quantity'] = pd.to_numeric(df_tax['Quantity'], errors='coerce').fillna(0)
+                        # 4. คำนวณยอดเงิน (แปลงเป็นตัวเลขก่อนคำนวณ)
+                        for col in ['SKU Unit Original Price', 'Quantity', 'Shipping Fee After Discount', 'SKU Seller Discount']:
+                            df_tax[col] = pd.to_numeric(df_tax[col], errors='coerce').fillna(0)
+                            
                         df_tax['จำนวนเงิน'] = df_tax['SKU Unit Original Price'] * df_tax['Quantity']
                         
-                        # **แก้ค่าขนส่งซ้ำ**
-                        df_tax['Shipping Fee After Discount'] = pd.to_numeric(df_tax['Shipping Fee After Discount'], errors='coerce').fillna(0)
+                        # ==========================================================
+                        # 5. แก้ค่าขนส่งซ้ำ (ให้เหลือแค่แถวแรกของ Order ID นั้น)
+                        # ==========================================================
                         is_duplicate_order = df_tax.duplicated(subset=['Order ID'], keep='first')
                         df_tax.loc[is_duplicate_order, 'Shipping Fee After Discount'] = 0
-                        
-                        # เลือกและเปลี่ยนชื่อคอลัมน์
+                        # ==========================================================
+
+                        # 6. เลือกและเปลี่ยนชื่อคอลัมน์ (เรียงตามที่คุณต้องการ)
                         cols_mapping = {
-                            'Invoice No': 'Invoice No', 'Order ID': 'Order ID', 'Created Time': 'Created Time',
-                            'SKU ID': 'SKU ID', 'Product Name': 'Product Name', 'Variation': 'Variation',
-                            'SKU Unit Original Price': 'SKU Unit Original Price', 'Quantity': 'Quantity',
-                            'จำนวนเงิน': 'จำนวนเงิน', 'SKU Seller Discount': 'ส่วนลด',
-                            'Shipping Fee After Discount': 'ค่าขนส่ง', 'Order Status': 'Order Status'
+                            'Invoice No': 'Invoice No',
+                            'Order ID': 'Order ID',
+                            'Created Time': 'Created Time',
+                            'SKU ID': 'SKU ID',
+                            'Product Name': 'Product Name',
+                            'Variation': 'Variation',
+                            'SKU Unit Original Price': 'SKU Unit Original Price',
+                            'Quantity': 'Quantity',
+                            'จำนวนเงิน': 'จำนวนเงิน',
+                            'SKU Seller Discount': 'ส่วนลด',
+                            'Shipping Fee After Discount': 'ค่าขนส่ง',
+                            'Order Status': 'Order Status'
                         }
+                        
                         final_cols = list(cols_mapping.keys())
                         df_final = df_tax[final_cols].rename(columns=cols_mapping)
                         
-                        st.success("✅ สร้างรายงานสำเร็จ (ค่าขนส่งซ้ำเป็น 0 แล้ว)")
-                        st.dataframe(df_final.head(10))
+                        st.success("✅ สร้างรายงานสำเร็จ!")
+                        st.dataframe(df_final.head(20))
                         
-                        # ดาวน์โหลด
+                        # ปุ่มดาวน์โหลด
                         buffer = io.BytesIO()
                         with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
                             df_final.to_excel(writer, index=False)
-                        st.download_button("⬇️ ดาวน์โหลดรายงาน (.xlsx)", buffer.getvalue(), f"Tax_Report_{start_invoice}.xlsx")
+                            
+                        st.download_button(
+                            label="⬇️ ดาวน์โหลดรายงาน (.xlsx)",
+                            data=buffer.getvalue(),
+                            file_name=f"Tax_Report_{start_invoice}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
 
-        # --- TAB 2: โหมดเดิม ---
+        # =========================================================
+        # TAB 2: ดูข้อมูลต้นฉบับ
+        # =========================================================
         with tab2:
-            st.write("โหมดเรียงข้อมูลปกติ (Oldest -> Newest)")
-            if st.button("เรียงข้อมูล"):
-                target_cols = ["Order ID", "Order Status", "SKU ID", "Product Name", "Variation", "Quantity", "Created Time"]
-                avail_cols = [c for c in target_cols if c in df.columns]
-                df_filt = df[avail_cols].sort_values(by="Created Time", ascending=True)
-                st.dataframe(df_filt.head())
+            st.write("ข้อมูลดิบที่อ่านได้จากไฟล์:")
+            st.dataframe(df.head(50))
 
     except Exception as e:
         st.error(f"เกิดข้อผิดพลาด: {e}")
+        st.info("ลองเปลี่ยนตัวเลข 'บรรทัดหัวข้อ' ที่เมนูด้านซ้ายดูครับ")
+else:
+    st.info("👈 กรุณาอัปโหลดไฟล์ CSV ที่เมนูด้านซ้าย")
