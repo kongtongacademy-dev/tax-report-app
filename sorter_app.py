@@ -9,9 +9,22 @@ from email.mime.text import MIMEText
 from email import encoders
 
 # ---------------------------------------------------------
-# ฟังก์ชันส่งอีเมล (Gmail SMTP)
+# ฟังก์ชันทำความสะอาดตัวเลข (ลบ THB, ลบลูกน้ำ)
 # ---------------------------------------------------------
-# (โค้ดส่วนนี้ไม่ได้เปลี่ยนแปลง)
+def clean_currency(x):
+    if pd.isna(x):
+        return 0.0
+    s = str(x)
+    # ลบคำว่า THB, ตัวอักษร, เว้นวรรค, ลูกน้ำ (เก็บเฉพาะ 0-9 . -)
+    s_clean = re.sub(r'[^\d.-]', '', s)
+    try:
+        return float(s_clean)
+    except ValueError:
+        return 0.0
+
+# ---------------------------------------------------------
+# ฟังก์ชันส่งอีเมล
+# ---------------------------------------------------------
 def send_email_with_attachment(sender_email, sender_password, receiver_email, subject, body, file_buffer, filename):
     try:
         msg = MIMEMultipart()
@@ -39,7 +52,6 @@ def send_email_with_attachment(sender_email, sender_password, receiver_email, su
 # ---------------------------------------------------------
 # ฟังก์ชันรันเลข Invoice
 # ---------------------------------------------------------
-# (โค้ดส่วนนี้ไม่ได้เปลี่ยนแปลง)
 def generate_invoice_map(df, start_inv, order_col="Order ID", date_col="Created Time"):
     df_sorted = df.sort_values(by=date_col, ascending=True)
     unique_orders = df_sorted[order_col].unique()
@@ -64,8 +76,8 @@ def generate_invoice_map(df, start_inv, order_col="Order ID", date_col="Created 
 # ---------------------------------------------------------
 # ตั้งค่าหน้าเว็บ
 # ---------------------------------------------------------
-st.set_page_config(page_title="Excel Tax Report & Email", layout="wide")
-st.title("📊 ระบบจัดการไฟล์ Excel & รายงานภาษีขาย (VAT)")
+st.set_page_config(page_title="Excel Tax Report (Fixed)", layout="wide")
+st.title("📊 ระบบจัดการไฟล์ Excel & รายงานภาษีขาย (รองรับ THB)")
 
 # ---------------------------------------------------------
 # Sidebar
@@ -82,12 +94,13 @@ with st.sidebar:
 # ---------------------------------------------------------
 if uploaded_file is not None:
     try:
+        # อ่านไฟล์
         if uploaded_file.name.endswith('.csv'):
             df = pd.read_csv(uploaded_file, header=header_row)
         else:
             df = pd.read_excel(uploaded_file, header=header_row)
 
-        df.columns = df.columns.str.strip() # ลบวรรคหัวท้ายชื่อคอลัมน์
+        df.columns = df.columns.str.strip()
 
         # แปลงวันที่
         if "Created Time" in df.columns:
@@ -96,7 +109,7 @@ if uploaded_file is not None:
         tab1, tab2 = st.tabs(["📑 รายงานภาษีขาย (Tax Report)", "🔍 ข้อมูลต้นฉบับ"])
 
         with tab1:
-            st.subheader("สร้างรายงานภาษีขายและคำนวณ VAT")
+            st.subheader("สร้างรายงานภาษีขาย (คำนวณยอดเงิน + VAT)")
             
             col_input, _ = st.columns([2, 1])
             with col_input:
@@ -123,60 +136,51 @@ if uploaded_file is not None:
                         df_tax = df_tax.sort_values(by="Created Time", ascending=True)
                         df_tax['Invoice No'] = df_tax['Order ID'].map(inv_map)
                         
-                        # [NEW] แปลงคอลัมน์เงินให้เป็นตัวเลขและเติม 0 ถ้าว่าง (เพื่อการคำนวณ)
-                        for col in ['SKU Unit Original Price', 'Quantity', 'Shipping Fee After Discount', 'SKU Seller Discount']:
-                            df_tax[col] = pd.to_numeric(df_tax[col], errors='coerce').fillna(0)
+                        # ล้างค่าเงิน (THB) ออกก่อนคำนวณ
+                        cols_to_clean = ['SKU Unit Original Price', 'Quantity', 'Shipping Fee After Discount', 'SKU Seller Discount']
+                        for col in cols_to_clean:
+                            df_tax[col] = df_tax[col].apply(clean_currency)
                             
-                        # 1. คำนวณจำนวนเงิน (ราคาต่อหน่วย * จำนวน)
+                        # คำนวณต่างๆ
                         df_tax['จำนวนเงิน'] = df_tax['SKU Unit Original Price'] * df_tax['Quantity']
                         
-                        # 2. แก้ค่าขนส่งซ้ำ (ให้เหลือแค่แถวแรกของ Order ID นั้น)
+                        # แก้ค่าขนส่งซ้ำ
                         is_duplicate_order = df_tax.duplicated(subset=['Order ID'], keep='first')
                         df_tax.loc[is_duplicate_order, 'Shipping Fee After Discount'] = 0
 
-                        # 3. คำนวณยอดรวมสุทธิ (Total Net)
-                        # Total Net = (จำนวนเงิน - ส่วนลด) + ค่าขนส่ง
-                        df_tax['ยอดรวมสุทธิ'] = (
-                            df_tax['จำนวนเงิน'] - df_tax['SKU Seller Discount']
-                        ) + df_tax['Shipping Fee After Discount']
-                        
-                        # 4. คำนวณยอดก่อนภาษี (Tax Base)
-                        # Tax Base = ยอดรวมสุทธิ / 1.07
+                        # คำนวณ VAT
+                        df_tax['ยอดรวมสุทธิ'] = (df_tax['จำนวนเงิน'] - df_tax['SKU Seller Discount']) + df_tax['Shipping Fee After Discount']
                         df_tax['ยอดก่อนภาษี'] = df_tax['ยอดรวมสุทธิ'] / 1.07
-                        
-                        # 5. คำนวณ VAT (7%)
-                        # VAT = ยอดก่อนภาษี * 0.07
                         df_tax['VAT'] = df_tax['ยอดก่อนภาษี'] * 0.07
 
-                        # 6. จัดการวันที่: ตัดเวลาทิ้ง เหลือแค่ dd/mm/yyyy
+                        # จัดการวันที่ (ตัดเวลา)
                         df_tax['Created Time'] = df_tax['Created Time'].dt.strftime('%d/%m/%Y')
                         
-                        # 7. จัดเรียงและเปลี่ยนชื่อคอลัมน์สุดท้าย
+                        # จัดเรียงคอลัมน์ (เอา Order Status ไปท้ายสุด)
                         cols_mapping = {
-                            # ข้อมูลหลัก
-                            'Invoice No': 'Invoice No', 'Order ID': 'Order ID', 'Created Time': 'Created Time',
-                            'SKU ID': 'SKU ID', 'Product Name': 'Product Name', 'Variation': 'Variation',
-                            'Order Status': 'Order Status',
-                            # ราคา/จำนวน
-                            'SKU Unit Original Price': 'ราคาต่อหน่วย', 'Quantity': 'จำนวน',
-                            # การเงิน
+                            'Invoice No': 'Invoice No', 
+                            'Order ID': 'Order ID', 
+                            'Created Time': 'Created Time',
+                            'SKU ID': 'SKU ID', 
+                            'Product Name': 'Product Name', 
+                            'Variation': 'Variation',
+                            'SKU Unit Original Price': 'ราคาต่อหน่วย', 
+                            'Quantity': 'จำนวน',
                             'จำนวนเงิน': 'จำนวนเงิน',
                             'SKU Seller Discount': 'ส่วนลด',
                             'Shipping Fee After Discount': 'ค่าขนส่ง',
-                            # ผลลัพธ์บัญชี
                             'ยอดรวมสุทธิ': 'ยอดรวมสุทธิ',
                             'ยอดก่อนภาษี': 'ยอดก่อนภาษี',
-                            'VAT': 'VAT'
+                            'VAT': 'VAT',
+                            'Order Status': 'Order Status'  # <--- ย้ายมาไว้ตรงนี้ครับ (ท้ายสุด)
                         }
                         
-                        # เลือกเฉพาะคอลัมน์ที่ต้องการ และใช้ชื่อที่กำหนด
                         final_cols_keys = list(cols_mapping.keys())
                         df_final = df_tax[final_cols_keys].rename(columns=cols_mapping)
                         
-                        st.success("✅ สร้างรายงานและคำนวณภาษีเสร็จสมบูรณ์!")
+                        st.success("✅ คำนวณเสร็จสมบูรณ์!")
                         st.dataframe(df_final.head(10))
                         
-                        # เตรียมไฟล์ลง Buffer
                         buffer = io.BytesIO()
                         with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
                             df_final.to_excel(writer, index=False)
@@ -187,52 +191,39 @@ if uploaded_file is not None:
             # --- ส่วนส่งอีเมล ---
             if st.session_state.tax_file_buffer is not None:
                 st.divider()
-                st.subheader("📧 ส่งไฟล์ทางอีเมล / ดาวน์โหลด")
+                st.subheader("📧 ดาวน์โหลด / ส่งอีเมล")
                 
-                col_download, col_email = st.columns([1, 1])
-
-                with col_download:
-                    # ปุ่มดาวน์โหลดปกติ
-                    st.download_button(
-                        label="⬇️ ดาวน์โหลดไฟล์ลงเครื่อง",
+                col_dl, col_em = st.columns(2)
+                
+                with col_dl:
+                     st.download_button(
+                        label="⬇️ ดาวน์โหลดไฟล์ (.xlsx)",
                         data=st.session_state.tax_file_buffer.getvalue(),
                         file_name=st.session_state.tax_filename,
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        type="secondary"
+                        type="primary"
                     )
+                
+                with col_em:
+                    with st.expander("ส่งอีเมล"):
+                        if "EMAIL_USER" not in st.secrets:
+                            st.warning("⚠️ ต้องตั้งค่า Secrets ก่อน")
+                        else:
+                            recipient = st.text_input("อีเมลปลายทาง")
+                            if st.button("ส่งอีเมล"):
+                                success, msg = send_email_with_attachment(
+                                    st.secrets["EMAIL_USER"], st.secrets["EMAIL_PASSWORD"],
+                                    recipient, f"Tax Report {start_invoice}", "Attached.",
+                                    st.session_state.tax_file_buffer, st.session_state.tax_filename
+                                )
+                                if success: st.success(msg)
+                                else: st.error(msg)
 
-                with col_email:
-                    if "EMAIL_USER" not in st.secrets or "EMAIL_PASSWORD" not in st.secrets:
-                         st.warning("⚠️ ตั้งค่าอีเมลก่อนจึงจะส่งได้ (ดูวิธีด้านล่าง)")
-                    else:
-                        with st.popover("ส่งอีเมลพร้อมไฟล์แนบ"):
-                            recipient = st.text_input("ส่งไปที่อีเมล:", placeholder="accountant@company.com")
-                            email_subject = st.text_input("หัวข้ออีเมล:", value=f"รายงานภาษีขาย {start_invoice}")
-                            
-                            if st.button("📨 ยืนยันการส่งอีเมล"):
-                                if not recipient:
-                                    st.error("กรุณากรอกอีเมลปลายทาง")
-                                else:
-                                    with st.spinner("กำลังส่งอีเมล..."):
-                                        success, msg = send_email_with_attachment(
-                                            st.secrets["EMAIL_USER"],
-                                            st.secrets["EMAIL_PASSWORD"],
-                                            recipient,
-                                            email_subject,
-                                            "ไฟล์รายงานภาษีขายที่คำนวณ VAT แล้ว แนบมาพร้อมกับอีเมลนี้ครับ",
-                                            st.session_state.tax_file_buffer,
-                                            st.session_state.tax_filename
-                                        )
-                                        if success:
-                                            st.success(msg)
-                                        else:
-                                            st.error(msg)
         with tab2:
-            st.write("ข้อมูลดิบที่อ่านได้จากไฟล์:")
-            st.dataframe(df.head(5))
+            st.write("ตัวอย่างข้อมูลดิบ:")
+            st.dataframe(df.head(50))
 
     except Exception as e:
         st.error(f"Error: {e}")
-        st.info("ลองเปลี่ยนตัวเลข 'บรรทัดหัวข้อ' ที่เมนูด้านซ้ายดูครับ")
 else:
-    st.info("👈 กรุณาอัปโหลดไฟล์ CSV ที่เมนูด้านซ้าย")
+    st.info("👈 กรุณาอัปโหลดไฟล์ที่เมนูด้านซ้าย")
